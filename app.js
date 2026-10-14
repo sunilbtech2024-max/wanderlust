@@ -1,109 +1,130 @@
+
+if(process.env.NODE_ENV !== "production"){
+    require("dotenv").config();
+}
+
+
+
+
 const express=require("express");
 const app=express();
+const dns=require("dns");
 const mongoose=require("mongoose");
-const Listing = require("./models/listing.js");
+
 const path=require("path");
 const methodOverride=require("method-override");
 const ejsMate = require("ejs-mate");
+
+const ExpressError =require("./utils/ExpressError.js");
+
+const listingRouter= require("./routes/listing.js");
+const reviewRouter= require("./routes/review.js");
+const userRouter= require("./routes/user.js");
+
+const session=require("express-session");
+const { MongoStore } = require('connect-mongo');
+const flash=require("connect-flash");
+
+const passport= require("passport");
+const LocalStrategy=require("passport-local");
+const User=require("./models/user.js");
+
+
+// 
+const dbUrl = process.env.ATLASDB_URL;
+const mongoDnsServer = process.env.MONGODB_DNS_SERVER;
+
+if (mongoDnsServer) {
+  dns.setServers([mongoDnsServer]);
+}
+
+if (!dbUrl || !dbUrl.startsWith("mongodb")) {
+  console.error("Missing or invalid MongoDB connection string in ATLASDB_URL. Check your .env file.");
+  process.exit(1);
+}
+
+main()
+  .then(() => {
+    console.log("connected to db");
+    app.listen(8080, () => {
+      console.log("app is listening on 8080");
+    });
+  })
+  .catch((err) => {
+    console.error("Could not connect to MongoDB:", err.message);
+    process.exit(1);
+  });
+
+async function main() {
+  await mongoose.connect(dbUrl);
+}
+
 app.use(methodOverride("_method"));
 app.use(express.static(path.join(__dirname,"public")));
 app.engine("ejs", ejsMate);
 app.set("view engine","ejs");
 app.set("views",path.join(__dirname,"views"));
 app.use(express.urlencoded({extended:true}));
-const Mongo_Url="mongodb://127.0.0.1:27017/wanderlust";
 
-//mongodb connect
-main()
-.then(()=>{
-    console.log("connected to db");
-})
-
-.catch(err => console.log(err));
-
-async function main() {
-  await mongoose.connect( Mongo_Url);
-
- 
-}
-
-//basic api
-app.get("/",(req,res)=>{
-    res.send("Hi,I am root.");
-});
-//Index Route
-//return everythings
-app.get("/listings",async (req,res)=>{
-  const allListings= await Listing.find({})
-  res.render("listing/index.ejs",{allListings});
-});
-//new route
-app.get("/listings/new",(req,res)=>{
-
-  
-  res.render("listing/new.ejs");
-});
-//edit route
-
-app.get("/listings/:id/edit",async (req,res)=>{
-  let {id}=req.params;
-  const listing=await Listing.findById(id);
-  res.render("listing/edit.ejs",{listing});
+const store=  MongoStore.create({
+  mongoUrl:dbUrl,
+  crypto:{
+    secret:process.env.SECRET,
+  },
+  touchAfter:24*3600,
 });
 
-//show route
-app.get("/listings/:id",async(req,res)=>{
-  let {id}=req.params;
-  console.log(id);
-  const listing=await Listing.findById(id);
-  res.render("listing/show.ejs",{listing});
-});
-//database insert
-// app.get("/testListings",async (req,res)=>{
-//     let sampleList=new Listing({
-//         title:"My new home",
-//         description:"Near the Jungle & Mountain",
-//         price:100,
-//         location:"Kathmandu",
-//         country:"Nepal",
-//     });
-//    await  sampleList.save();
-//    console.log("sample was saved");
-//    res.send("server");
-// });
-//server start
-//create route
+//session
+const sessionOptions= {
+  store,
+  secret:process.env.SECRET,
+  resave:false,
+  saveUninitialized:true,
+  cookie:{
+    expires:Date.now() + 10*24*60*60*1000,
+    maxAge:10*24*60*60*1000,
+    httpOnly:true,
 
-// // app.post("/listings",async (req,res)=>{
-//   //let {title,image,description,price,location,country} = req.body;
-//   const  newListing=new Listing(req.body);
-//   await newListing.save();
-//  // console.log(newListing);
-//   res.redirect("/listings");
-// });
-app.post("/listings", async (req, res) => {
-  const newListing = new Listing(req.body.listing);
+  }
+};
 
-  await newListing.save();
 
-  res.redirect("/listings");
+app.use(session(sessionOptions));
+app.use(flash());
+
+
+//authenticate
+app.use(passport.initialize());
+app.use(passport.session());
+passport.use(new LocalStrategy(User.authenticate()));
+
+passport.serializeUser(User.serializeUser());
+passport.deserializeUser(User.deserializeUser());
+
+app.use((req,res,next)=>{
+  res.locals.success=req.flash("success");
+  res.locals.error=req.flash("error");
+  res.locals.currUser =req.user;
+  next();
 });
 
-//update route
-app.put("/listings/:id", async (req, res) => {
-    let { id } = req.params;
-    await Listing.findByIdAndUpdate(id, { ...req.body.listing });
-    
-    // Correct redirect syntax (Sahi path):
-    res.redirect(`/listings/${id}`); 
-    // Ya phir: res.redirect("/listings");
+
+
+ app.use("/listings",listingRouter);
+ app.use("/listings/:id/reviews",reviewRouter);
+app.use("/",userRouter);
+
+
+
+
+//agar kuch bhi nahi aaa to
+app.all("/{*splat}",(req,res,next)=>{
+  next(new ExpressError(404,"page Not found"));
 });
-app.delete("/listings/:id", async (req, res) => {
-    let { id } = req.params;
-    let deleteListing = await Listing.findByIdAndDelete(id);
-    console.log(deleteListing);
-    res.redirect("/listings");
+//khud ke error passs
+app.use((err,req,res,next)=>{
+  let {statusCode=500, message="Something went wrong!"}= err;
+  res.status(statusCode).render("error.ejs",{message});
+ // res.status(statusCode).send(message);
 });
-app.listen(8080,()=>{
-    console.log("app is listeining on 8080");
-});
+
